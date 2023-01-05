@@ -2,6 +2,7 @@ local M = {}
 local api = vim.api
 local inspect = vim.inspect
 local fn = vim.fn
+local cmd = vim.cmd
 local block_next_resize_event = false
 
 local function calc_padding(win, width)
@@ -14,6 +15,10 @@ local function calc_padding(win, width)
 	end
 
 	return math.floor(padding)
+end
+
+local function get_last_win()
+	return fn.win_getid(fn.winnr('#'))
 end
 
 local function get_win_at(side)
@@ -71,11 +76,16 @@ end
 M.get_width = padparent_get_width
 
 function M.check()
-	local ok, padwins = pcall(api.nvim_win_get_var, api.nvim_get_current_win(), 'padwins')
+	local ok = pcall(api.nvim_win_get_var, api.nvim_get_current_win(), 'padwins')
 	return ok
 end
 
 local function padparent_avoid_displacement()
+	local last_win = get_last_win()
+	if not padparent_get_padwins(last_win) then
+		return
+	end
+
 	local win = api.nvim_get_current_win()
 	local padwin_on_left = padparent_get_padwins(get_win_at('h'))
 	local padwin_on_right = padparent_get_padwins(get_win_at('l'))
@@ -83,13 +93,13 @@ local function padparent_avoid_displacement()
 	if padwin_on_left and not padwin_on_right then
 		vim.cmd('wincmd x')
 		api.nvim_win_set_width(win, api.nvim_win_get_width(win)+api.nvim_win_get_width(padwin_on_left[1]))
-		print('LEFT')
 	elseif not padwin_on_left and padwin_on_right then
 		vim.cmd('wincmd h')
 		vim.cmd('wincmd x')
-		print('RIGHT')
 		api.nvim_win_set_width(win, api.nvim_win_get_width(win)+api.nvim_win_get_width(padwin_on_right[1]))
 	end
+
+	M.center(last_win)
 end
 
 local function padparent_set_padwins(padparent, padwins)
@@ -112,10 +122,6 @@ local function padwin_new(side, win)
 	api.nvim_win_set_var(padwin, 'padparent', win)
 	api.nvim_win_set_buf(padwin, padbuf_new(win))
 
-	--local padwins = padparent_get_padwins(win) or {}
-	--padwins[side] = padwin
-	--api.nvim_win_set_var(win, 'padwins', padwins)
-
 	-- Go back to original window
 	api.nvim_set_current_win(org_win)
 
@@ -129,15 +135,25 @@ local function padwin_avoid_enter()
 		return
 	end
 
+	local function go_to_win_at(side, alt_side)
+		local win = api.nvim_get_current_win()
+		cmd('wincmd '..side)
+		if win == api.nvim_get_current_win()  then
+			cmd('wincmd '..alt_side)
+		end
+	end
+
 	local last_win = fn.win_getid(fn.winnr('#'))
-	local row_win, col_win = api.nvim_win_get_position(win)
-	local row_last_win, col_last_win = api.nvim_win_get_position(last_win)
+	local position_win = api.nvim_win_get_position(win)
+	local position_last_win  = api.nvim_win_get_position(last_win)
+	local col_win = position_win[2]
+	local col_last_win = position_last_win[2]
 
 	-- is on the left
 	if col_last_win < col_win then
-		api.nvim_cmd('wincmd l')
+		go_to_win_at('l', 'h')
 	else
-		api.nvim_cmd('wincmd h')
+		go_to_win_at('h', 'l')
 	end
 
 	-- TODO: avoid enter to padwin from up
@@ -157,6 +173,7 @@ function M.refresh(windows)
 
 		local padwins = padparent_get_padwins(win)
 		if padwins then
+			print('refresh')
 			local width = padparent_get_width(win)
 			local padding = calc_padding(nil, width)
 
