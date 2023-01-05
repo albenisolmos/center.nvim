@@ -76,7 +76,9 @@ end
 M.get_width = padparent_get_width
 
 function M.check()
-	local ok = pcall(api.nvim_win_get_var, api.nvim_get_current_win(), 'padwins')
+	local win = api.nvim_get_current_win()
+	local ok = pcall(api.nvim_win_get_var, win, 'padwins')
+	print(win, ok)
 	return ok
 end
 
@@ -85,21 +87,20 @@ local function padparent_avoid_displacement()
 	if not padparent_get_padwins(last_win) then
 		return
 	end
+	print('padparent_avoid_displacement')
 
 	local win = api.nvim_get_current_win()
 	local padwin_on_left = padparent_get_padwins(get_win_at('h'))
 	local padwin_on_right = padparent_get_padwins(get_win_at('l'))
 
 	if padwin_on_left and not padwin_on_right then
-		vim.cmd('wincmd x')
+		cmd('wincmd x')
 		api.nvim_win_set_width(win, api.nvim_win_get_width(win)+api.nvim_win_get_width(padwin_on_left[1]))
 	elseif not padwin_on_left and padwin_on_right then
-		vim.cmd('wincmd h')
-		vim.cmd('wincmd x')
+		cmd('wincmd h')
+		cmd('wincmd x')
 		api.nvim_win_set_width(win, api.nvim_win_get_width(win)+api.nvim_win_get_width(padwin_on_right[1]))
 	end
-
-	M.center(last_win)
 end
 
 local function padparent_set_padwins(padparent, padwins)
@@ -109,6 +110,7 @@ end
 local function padwin_new(side, win)
 	local org_win = api.nvim_get_current_win()
 	win = win or org_win
+	api.nvim_set_current_win(win)
 
 	-- Create padwin
 	if side == 1 then
@@ -136,9 +138,9 @@ local function padwin_avoid_enter()
 	end
 
 	local function go_to_win_at(side, alt_side)
-		local win = api.nvim_get_current_win()
+		local cur_win = api.nvim_get_current_win()
 		cmd('wincmd '..side)
-		if win == api.nvim_get_current_win()  then
+		if cur_win == api.nvim_get_current_win() then
 			cmd('wincmd '..alt_side)
 		end
 	end
@@ -173,20 +175,20 @@ function M.refresh(windows)
 
 		local padwins = padparent_get_padwins(win)
 		if padwins then
-			print('refresh')
 			local width = padparent_get_width(win)
 			local padding = calc_padding(nil, width)
 
 			if padding > 0 then
 				M.center(win, padding, padwins)
 			else
-				M.offcenter(win, true)
+				M.offcenter(win, padwins, true)
 			end
+			block_next_resize_event = false
 		end
 	end
 end
 
-function M.center(win, padding, padwins, no_resize_event)
+function M.center(win, padding, padwins)
 	win = win or api.nvim_get_current_win()
 	padwins = padparent_get_padwins(win, padwins)
 
@@ -211,7 +213,6 @@ function M.center(win, padding, padwins, no_resize_event)
 	else
 		local width = padparent_get_width(win)
 		padding = calc_padding(nil, width)
-		print(padding)
 		padwins = {padwin_new(1, win), padwin_new(2, win)}
 
 		padparent_set_padwins(win, padwins)
@@ -222,22 +223,31 @@ function M.center(win, padding, padwins, no_resize_event)
 		api.nvim_win_set_width(padwins[2], padding)
 	end
 
-	block_next_resize_event = true
+	block_next_resize_event = false
 end
 
 function M.offcenter(win, padwins, keep_var)
+	print('offcenter')
 	win = win or api.nvim_get_current_win()
 	padwins = padparent_get_padwins(win, padwins)
 
 	if keep_var then
-		padparent_set_padwins(win,  {})
+		padparent_set_padwins(win, {})
 	else
 		api.nvim_win_del_var(win, 'padwins')
 	end
 
-	for _, padwin in pairs(padwins) do
-		api.nvim_win_close(padwin, true)
-	end
+	assert(#padwins > 0)
+	api.nvim_win_close(padwins[1], true)
+	local w1 = api.nvim_win_get_width(win)
+	local w2 = api.nvim_win_get_width(padwins[2])
+	api.nvim_win_close(padwins[2], true)
+	api.nvim_win_set_width(win, w1 + w2)
+	block_next_resize_event = true
+
+	--for _, padwin in pairs(padwins) do
+	--	api.nvim_win_close(padwin, true)
+	--end
 end
 
 function M.setup()
