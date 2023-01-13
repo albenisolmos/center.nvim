@@ -15,7 +15,7 @@ local function calc_padding(width)
 		padding = 0
 	end
 
-	return math.floor(padding)
+	return math.ceil(padding)
 end
 
 local function get_last_win()
@@ -56,7 +56,7 @@ local function padwin_new(side, win)
 	win = win or org_win
 	api.nvim_set_current_win(win)
 
-	-- Create padwinwins
+	-- Create padwins
 	if side == 1 then
 		cmd('vertical leftabove sb')
 	elseif side == 2 then
@@ -140,7 +140,11 @@ M.get_width = padparent_get_width
 
 local function padparent_calc_padding(padparent, width)
 	width = width or padparent_get_width(padparent)
-	return calc_padding(width)
+	local padding = calc_padding(width)
+	--if padding > 0 then
+	--	padding = padding + 1
+	--end
+	return padding
 end
 
 local function padparent_set_padwins(padparent, padwins)
@@ -156,24 +160,26 @@ local function padparent_add_padding(padparent)
 
 	return padwins
 end
-
+local count = 0
 local function padparent_fix_position(win, col_win)
+	local function excess_cells(cell1, cell2)
+		return math.abs(cell2 - cell1)
+	end
+
 	local org_win = api.nvim_get_current_win()
 	local new_col_win = api.nvim_win_get_position(win)[2]
-	local function excess_cells(cell1, cell2)
-		local ret = math.abs(cell2 - cell1)
-		return ret
-	end
 	local excess = excess_cells(col_win, new_col_win)
+	count = count + 1
 
 	api.nvim_set_current_win(win)
+
 	if col_win < new_col_win then
-		print(string.format('padparent_fix_position: org_col: %d, new_col: %d -> wincmd %d%s | ', col_win, new_col_win, excess, '>'))
-		cmd('wincmd 2l')
+		print(count, string.format('padparent_fix_position: org_col: %d, new_col: %d win_from: %d -> wincmd %d%s', col_win, new_col_win, get_win_at('2l'), excess, '<'))
+		cmd('wincmd 2h')
 		cmd(string.format('wincmd %d%s', excess, '<'))
 	elseif col_win > new_col_win then
-		print(string.format('wincmd %d%s | col%d newcol%d', excess, '<', col_win, new_col_win))
-		cmd('wincmd 2h')
+		--print(string.format('wincmd %d%s | col%d newcol%d', excess, '<', col_win, new_col_win))
+		cmd('wincmd 2l')
 		cmd(string.format('wincmd %d%s', excess, '>'))
 	end
 
@@ -209,6 +215,14 @@ function M.is_padparent()
 	print(win, ok)
 end
 
+local function has(tbl, key)
+	for i,value in pairs(tbl) do
+		if value == key then
+			return value
+		end
+	end
+end
+
 function M.refresh(windows)
 	if block_next_resize_event then
 		block_next_resize_event = false
@@ -216,14 +230,19 @@ function M.refresh(windows)
 	end
 	assert(type(windows) == 'table')
 
+	local refreshed_windows = {}
 	for _, win in pairs(windows) do
 		local ok, padparent = pcall(api.nvim_win_get_var, win, 'padparent')
 		if ok then
 			win = padparent
 		end
+		if has(refreshed_windows, win) then
+			goto continue
+		end
 
 		local padwins = padparent_get_padwins(win)
 		if padwins then
+			table.insert(refreshed_windows, win)
 			local padding = padparent_calc_padding(win)
 
 			if padding > 0 then
@@ -234,6 +253,8 @@ function M.refresh(windows)
 				block_next_resize_event = true
 			end
 		end
+
+		::continue::
 	end
 end
 
@@ -258,8 +279,8 @@ function M.center(win, padding, padwins)
 		padwins = padparent_add_padding(win)
 
 		-- center
-		padparent_fix_position(win, col_win)
 		padparent_set_width(win, padwins, width, padding)
+		padparent_fix_position(win, col_win)
 	else
 		padparent_set_width(win, padwins, width, padding)
 	end
@@ -274,13 +295,15 @@ function M.offcenter(win, padwins, keep_var)
 		return
 	end
 
-	local w0 = padparent_get_width(win)
+	local width_win = padparent_get_width(win)
 	local col_win = api.nvim_win_get_position(padwins[1])[2]
+
+	print('offcenter')
 
 	api.nvim_win_close(padwins[1], true)
 	api.nvim_win_close(padwins[2], true)
 	padparent_fix_position(win, col_win)
-	api.nvim_win_set_width(win, w0)
+	api.nvim_win_set_width(win, width_win+2)
 
 	if keep_var then
 		padparent_set_padwins(win, {})
@@ -297,7 +320,7 @@ function M.setup()
 		group = augroup_center,
 		callback = function()
 			for _,win in pairs(vim.v.event.windows) do
-				api.nvim_buf_set_lines(api.nvim_win_get_buf(win), 1,2, false, {tostring(api.nvim_win_get_position(win)[2])})
+				api.nvim_buf_set_lines(api.nvim_win_get_buf(win), 1,2, false, {'col: '..tostring(api.nvim_win_get_position(win)[2])})
 			end
 			M.refresh(vim.v.event.windows)
 		end
@@ -307,6 +330,7 @@ function M.setup()
 		group = augroup_center,
 		callback = function()
 			cmd('enew')
+			api.nvim_buf_set_lines(api.nvim_win_get_buf(0), 0,1, false, {'win id: '..tostring(api.nvim_get_current_win())})
 			padparent_avoid_displacement()
 		end
 	})
