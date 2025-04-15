@@ -1,14 +1,159 @@
 local M = {}
+local vim = vim
 local api = vim.api
-local inspect = vim.inspect
 local fn = vim.fn
 local cmd = vim.cmd
-local block_next_resize_event = false
-local block_next_win_new_event = false
+local first_centering = false
+local _padwins = {}
+local block_refresh = false
+local DEFAULT_SETTINGS = {
+	autocentering = false,
+	win_width = 80,
+	on_padding_buf = function(buf, win) end,
+	debug = false,
+}
+M.DEFAULT_SETTINGS = DEFAULT_SETTINGS
+M.settings = DEFAULT_SETTINGS
 
-local function calc_padding(width)
-	local textwidth = 70
-	width = width or api.nvim_win_get_width(0)
+local function set_settings(opts)
+	M.settings = vim.tbl_deep_extend("force", M.settings, opts)
+	vim.validate({
+		autocenter = { M.settings.autocentering, "boolean" },
+		win_width = { M.settings.win_width, "number" },
+		on_padding_buf = { M.settings.on_padding_buf, "function" },
+		debug = { M.settings.debug, "boolean" },
+	})
+end
+
+local function create_padbuf(win)
+	local padbuf = api.nvim_create_buf(false, true)
+	local opt = {}
+
+	api.nvim_set_option_value("relativenumber", false, opt)
+	api.nvim_set_option_value("number", false, opt)
+	api.nvim_set_option_value("cursorline", false, opt)
+	api.nvim_set_option_value("cursorcolumn", false, opt)
+	api.nvim_buf_set_option(padbuf, "buftype", "nofile")
+	api.nvim_buf_set_option(padbuf, "bufhidden", "wipe")
+	api.nvim_buf_set_option(padbuf, "modifiable", false)
+	api.nvim_buf_set_option(padbuf, "buflisted", false)
+
+	if type(M.settings.on_padding_buf) == "function" then
+		M.settings.on_padding_buf(padbuf, win)
+	end
+
+	return padbuf
+end
+
+local function create_padwin(side, win)
+	local org_win = api.nvim_get_current_win()
+	win = win or org_win
+	api.nvim_set_current_win(win)
+
+	-- Create padwins
+	if side == 1 then
+		cmd("vertical leftabove sb")
+	elseif side == 2 then
+		cmd("vertical rightbelow sb")
+	end
+	local padwin = api.nvim_get_current_win()
+
+	-- Setup padwin
+	api.nvim_win_set_var(padwin, "padparent", win)
+	api.nvim_win_set_buf(padwin, create_padbuf(padwin))
+
+	-- TODO: there is any posibility to set up this with lua?
+	cmd([[setlocal fillchars=eob:\ ,vert:\ ]])
+	cmd([[setglobal fillchars=vert:\ ]])
+
+	-- Go back to original window
+	api.nvim_set_current_win(win)
+
+	return padwin
+end
+
+local function is_padwin(win)
+	return pcall(api.nvim_win_get_var, win, "padparent")
+end
+
+local function avoid_enter_padwin()
+	local win = api.nvim_get_current_win()
+
+	if not is_padwin(win) then
+		return
+	end
+
+	local function go_to_win_at(side, alt_side)
+		local cur_win = api.nvim_get_current_win()
+		cmd("wincmd " .. side)
+
+		if cur_win == api.nvim_get_current_win() then
+			cmd("wincmd " .. alt_side)
+		end
+	end
+
+	local last_win = fn.win_getid(fn.winnr("#"))
+	local position_win = api.nvim_win_get_position(win)
+	local position_last_win = api.nvim_win_get_position(last_win)
+	local col_win = position_win[2]
+	local col_last_win = position_last_win[2]
+
+	-- is on the left
+	if col_last_win < col_win then
+		go_to_win_at("l", "h")
+	else
+		go_to_win_at("h", "l")
+	end
+end
+
+local function get_padwins()
+	return _padwins
+end
+
+local function set_padwins(padwins)
+	_padwins = padwins
+end
+
+local function is_splitted_vertically()
+	local wins = api.nvim_tabpage_list_wins(0)
+	local i = 0
+
+	for _, win in pairs(wins) do
+		local row = api.nvim_win_get_position(win)[1]
+
+		if is_padwin(win) == false and row == 0 and i == 1 then
+			return true
+		end
+
+		i = i + 1
+	end
+end
+
+local function update_width(padparent, padwins, width, padding)
+	api.nvim_win_set_width(padwins[1], padding)
+	api.nvim_win_set_width(padparent, width - (padding * 2))
+	api.nvim_win_set_width(padwins[2], padding)
+end
+
+local function get_avaliable_width()
+	local wins = api.nvim_tabpage_list_wins(0)
+	local width = 0
+
+	for _, win in pairs(wins) do
+		local row = api.nvim_win_get_position(win)[1]
+
+		if row == 0 then
+			width = width + api.nvim_win_get_width(win)
+		end
+	end
+
+	return width
+end
+
+local function calc_padding()
+	local width = get_avaliable_width()
+
+	local textwidth = M.settings.win_width
 	local padding = (width - textwidth) / 2
 
 	if padding < 0 then
@@ -18,327 +163,151 @@ local function calc_padding(width)
 	return math.ceil(padding)
 end
 
-local function get_last_win()
-	return fn.win_getid(fn.winnr('#'))
-end
-
-local function get_win_at(side)
-	return fn.win_getid(fn.winnr(side))
-end
-
-local function padbuf_new(win)
-	local padbuf = api.nvim_create_buf(false, true)
-
-	-- add empty lines
-	for i=0, api.nvim_win_get_height(win) do
-		api.nvim_buf_set_lines(padbuf, i, i, false, {''})
-	end
-
-	-- buffer settings
-	local opt = {scope = 'local'}
-	api.nvim_set_option_value('number', false, opt)
-	api.nvim_set_option_value('relativenumber', false, opt)
-	api.nvim_set_option_value('cursorline', false, opt)
-	api.nvim_set_option_value('cursorcolumn', false, opt)
-
-	api.nvim_buf_set_option(padbuf, 'buftype', 'nofile')
-	api.nvim_buf_set_option(padbuf, 'bufhidden', 'wipe')
-	--api.nvim_buf_set_option(padbuf, 'modifiable', false)
-	api.nvim_buf_set_option(padbuf, 'modifiable', true)
-	api.nvim_buf_set_option(padbuf, 'buflisted', false)
-
-	return padbuf
-end
-
-local function padwin_new(side, win)
-	block_next_win_new_event = true
-	local org_win = api.nvim_get_current_win()
-	win = win or org_win
-	api.nvim_set_current_win(win)
-
-	-- Create padwins
-	if side == 1 then
-		cmd('vertical leftabove sb')
-	elseif side == 2 then
-		cmd('vertical rightbelow sb')
-	end
-	local padwin = api.nvim_get_current_win()
-
-	-- Setup padwin
-	api.nvim_win_set_var(padwin, 'padparent', win)
-	api.nvim_win_set_buf(padwin, padbuf_new(win))
-
-	-- Go back to original window
-	api.nvim_set_current_win(org_win)
-
-	block_next_win_new_event = false
-	return padwin
-end
-
-local function padwin_avoid_enter()
-	local win = api.nvim_get_current_win()
-	local is_padwin = pcall(api.nvim_win_get_var, win, 'padparent')
-	if not is_padwin then
-		return
-	end
-
-	local function go_to_win_at(side, alt_side)
-		local cur_win = api.nvim_get_current_win()
-		cmd('wincmd '..side)
-		if cur_win == api.nvim_get_current_win() then
-			cmd('wincmd '..alt_side)
-		end
-	end
-
-	local last_win = fn.win_getid(fn.winnr('#'))
-	local position_win = api.nvim_win_get_position(win)
-	local position_last_win  = api.nvim_win_get_position(last_win)
-	local col_win = position_win[2]
-	local col_last_win = position_last_win[2]
-
-	-- is on the left
-	if col_last_win < col_win then
-		go_to_win_at('l', 'h')
-	else
-		go_to_win_at('h', 'l')
-	end
-
-	-- TODO: avoid enter to padwin from up
-end
-
-local function padparent_get_padwins(padparent, padwins)
-	if padwins then
-		return padwins
-	else
-		local ok
-		ok, padwins = pcall(api.nvim_win_get_var, padparent, 'padwins')
-		if ok then
-			return padwins
-		end
-	end
-end
-
-local function padparent_set_width(padparent, padwins, width, padding)
-	api.nvim_win_set_width(padwins[1], padding)
-	api.nvim_win_set_width(padparent, width - (padding * 2))
-	api.nvim_win_set_width(padwins[2], padding)
-end
-
-local function padparent_get_width(padparent)
-	local ok, padwins = pcall(api.nvim_win_get_var, padparent, 'padwins')
-	local total_width = api.nvim_win_get_width(padparent)
-
-	if ok then
-		for _, padwin in pairs(padwins) do
-			total_width = total_width + api.nvim_win_get_width(padwin)
-		end
-	end
-
-	return total_width
-end
-M.get_width = padparent_get_width
-
-local function padparent_calc_padding(padparent, width)
-	width = width or padparent_get_width(padparent)
-	local padding = calc_padding(width)
-	--if padding > 0 then
-	--	padding = padding + 1
-	--end
-	return padding
-end
-
-local function padparent_set_padwins(padparent, padwins)
-	api.nvim_win_set_var(padparent, 'padwins', padwins)
-end
-
-local function padparent_add_padding(padparent)
-	vim.o.winfixwidth = true
-	local padwins = {padwin_new(1, padparent), padwin_new(2, padparent)}
-	vim.o.winfixwidth = false
-
-	padparent_set_padwins(padparent, padwins)
-
+local function create_padwins(padparent)
+	local padwins = { create_padwin(1, padparent), create_padwin(2, padparent) }
+	set_padwins(padwins)
 	return padwins
 end
-local count = 0
-local function padparent_fix_position(win, col_win)
-	local function excess_cells(cell1, cell2)
-		return math.abs(cell2 - cell1)
-	end
 
-	local org_win = api.nvim_get_current_win()
-	local new_col_win = api.nvim_win_get_position(win)[2]
-	local excess = excess_cells(col_win, new_col_win)
-	count = count + 1
+local function add_autocommands()
+	local augroup_center = api.nvim_create_augroup("Center", { clear = true })
+	local autocmd = api.nvim_create_autocmd
 
-	api.nvim_set_current_win(win)
+	autocmd("WinResized", {
+		group = augroup_center,
+		callback = function()
+			M.refresh(vim.v.event.windows)
+		end,
+	})
 
-	if col_win < new_col_win then
-		print(count, string.format('padparent_fix_position: org_col: %d, new_col: %d win_from: %d -> wincmd %d%s', col_win, new_col_win, get_win_at('2l'), excess, '<'))
-		cmd('wincmd 2h')
-		cmd(string.format('wincmd %d%s', excess, '<'))
-	elseif col_win > new_col_win then
-		--print(string.format('wincmd %d%s | col%d newcol%d', excess, '<', col_win, new_col_win))
-		cmd('wincmd 2l')
-		cmd(string.format('wincmd %d%s', excess, '>'))
-	end
+	autocmd({ "WinEnter", "VimEnter" }, {
+		group = augroup_center,
+		callback = avoid_enter_padwin,
+	})
 
-	api.nvim_set_current_win(org_win)
+	autocmd("WinClosed", {
+		group = augroup_center,
+		callback = function()
+			-- If theres more than one tab, dont quit
+			if #api.nvim_list_tabpages() > 1 then
+				return
+			end
+
+			local wins = api.nvim_tabpage_list_wins(0)
+			local i = #wins
+
+			for _, win in pairs(wins) do
+				if is_padwin(win) then
+					i = i - 1
+				end
+			end
+
+			if i == 1 then
+				cmd("qa!")
+			end
+		end,
+	})
 end
 
-local function padparent_avoid_displacement()
-	local last_win = get_last_win()
-	if block_next_win_new_event or not padparent_get_padwins(last_win) then
-		return
-	end
-
-	local win = api.nvim_get_current_win()
-	local padwin_on_left = padparent_get_padwins(get_win_at('h'))
-	local padwin_on_right = padparent_get_padwins(get_win_at('l'))
-
-	if padwin_on_left and not padwin_on_right then
-		cmd('wincmd x')
-		api.nvim_win_set_width(win,
-			api.nvim_win_get_width(win) + (padwin_on_left[1] and api.nvim_win_get_width(padwin_on_left[1]) or 0))
-	elseif not padwin_on_left and padwin_on_right then
-		cmd('wincmd h')
-		cmd('wincmd x')
-		api.nvim_win_set_width(win,
-			api.nvim_win_get_width(win) + (padwin_on_right[1] and api.nvim_win_get_width(padwin_on_right[1]) or 0))
-	end
-end
-
--- Temporal function for testing
-function M.is_padparent()
-	local win = api.nvim_get_current_win()
-	local ok = pcall(api.nvim_win_get_var, win, 'padwins')
-	print(win, ok)
-end
-
-local function has(tbl, key)
-	for i,value in pairs(tbl) do
-		if value == key then
-			return value
-		end
-	end
+local function remove_autocommands()
+	api.nvim_del_augroup_by_name("Center")
 end
 
 function M.refresh(windows)
-	if block_next_resize_event then
-		block_next_resize_event = false
+	if block_refresh then
 		return
 	end
-	assert(type(windows) == 'table')
+	assert(type(windows) == "table")
 
-	local refreshed_windows = {}
-	for _, win in pairs(windows) do
-		local ok, padparent = pcall(api.nvim_win_get_var, win, 'padparent')
-		if ok then
-			win = padparent
-		end
-		if has(refreshed_windows, win) then
-			goto continue
-		end
+	local padwins = get_padwins()
+	local padding = calc_padding()
 
-		local padwins = padparent_get_padwins(win)
-		if padwins then
-			table.insert(refreshed_windows, win)
-			local padding = padparent_calc_padding(win)
-
-			if padding > 0 then
-				M.center(win, padding, padwins)
-				block_next_resize_event = true
-			else
-				M.offcenter(win, padwins, true)
-				block_next_resize_event = true
-			end
-		end
-
-		::continue::
+	if is_splitted_vertically() then
+		M.offcenter()
+	elseif padding > 0 then
+		M.center()
+	elseif #padwins == 0 and padding == 0 then
+		return
+	else
+		M.offcenter()
 	end
 end
 
 function M.center(win, padding, padwins)
-	win = win or api.nvim_get_current_win()
-	padwins = padparent_get_padwins(win, padwins)
-	local width = padparent_get_width(win)
-	padding = padding or padparent_calc_padding(win, width)
+	block_refresh = true
 
-	if not padwins then
-		-- if there is not enough space to center then don't center, just convert win to a padparent without padding
+	--  Check for the first centering for attach autocommand
+	if first_centering == false then
+		add_autocommands()
+		first_centering = true
+	end
+
+	win = win or api.nvim_get_current_win()
+	local wins = api.nvim_tabpage_list_wins(0)
+
+	-- Get first win that is not padwin
+	for _, w in pairs(wins) do
+		if not is_padwin(w) then
+			win = w
+			break
+		end
+	end
+
+	padwins = get_padwins()
+	local width = get_avaliable_width()
+	padding = padding or calc_padding()
+
+	if not padwins or #padwins == 0 then
+		-- if there is not enough space to center then don't center
 		if padding == 0 then
-			padparent_set_padwins(win, {})
 			return
 		end
 
-		-- center
-		padwins = padparent_add_padding(win)
-		padparent_set_width(win, padwins, width, padding)
-	elseif #padwins == 0 then
-		local col_win = api.nvim_win_get_position(win)[2]
-		padwins = padparent_add_padding(win)
-
-		-- center
-		padparent_set_width(win, padwins, width, padding)
-		padparent_fix_position(win, col_win)
+		padwins = create_padwins(win)
+		update_width(win, padwins, width, padding)
 	else
-		padparent_set_width(win, padwins, width, padding)
+		update_width(win, padwins, width, padding)
 	end
+
+	block_refresh = false
 end
 
-function M.offcenter(win, padwins, keep_var)
+function M.offcenter(win, padwins)
+	block_refresh = true
 	win = win or api.nvim_get_current_win()
-	padwins = padparent_get_padwins(win, padwins)
+	padwins = padwins or get_padwins()
 
-	-- BUG: Why is offcenter called several times with #padwins == 0
-	if #padwins == 0 then
+	if not padwins or #padwins == 0 then
+		block_refresh = false
 		return
 	end
 
-	local width_win = padparent_get_width(win)
-	local col_win = api.nvim_win_get_position(padwins[1])[2]
-
-	print('offcenter')
-
 	api.nvim_win_close(padwins[1], true)
 	api.nvim_win_close(padwins[2], true)
-	padparent_fix_position(win, col_win)
-	api.nvim_win_set_width(win, width_win+2)
+	set_padwins({})
 
-	if keep_var then
-		padparent_set_padwins(win, {})
-	else
-		api.nvim_win_del_var(win, 'padwins')
-	end
+	block_refresh = false
 end
 
-function M.setup()
-	local augroup_center = api.nvim_create_augroup('Center', {clear = true})
-	local autocmd = api.nvim_create_autocmd
+function M.setup(opts)
+	local command = api.nvim_create_user_command
 
-	autocmd('WinResized', {
-		group = augroup_center,
-		callback = function()
-			for _,win in pairs(vim.v.event.windows) do
-				api.nvim_buf_set_lines(api.nvim_win_get_buf(win), 1,2, false, {'col: '..tostring(api.nvim_win_get_position(win)[2])})
+	set_settings(opts)
+
+	command("Center", function(props)
+		for _, arg in pairs(props.fargs) do
+			if arg == "on" then
+				M.center()
+			elseif arg == "off" then
+				remove_autocommands()
+				M.offcenter()
 			end
-			M.refresh(vim.v.event.windows)
 		end
-	})
+	end, { nargs = 1 })
 
-	autocmd('WinNew', {
-		group = augroup_center,
-		callback = function()
-			cmd('enew')
-			api.nvim_buf_set_lines(api.nvim_win_get_buf(0), 0,1, false, {'win id: '..tostring(api.nvim_get_current_win())})
-			padparent_avoid_displacement()
-		end
-	})
-
-	autocmd('WinEnter', {
-		group = augroup_center,
-		callback = padwin_avoid_enter
-	})
+	if M.settings.autocentering == true then
+		M.center()
+	end
 end
 
 return M
