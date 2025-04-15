@@ -1,5 +1,6 @@
 # 🎯 center.nvim
 like other plugins, center.nvim place your view at center and dinamically refresh the center if there's any size change, nothing more.
+![center.nvim example](https://github.com/user-attachments/assets/102c202a-ff10-473d-902a-f355854deb40)
 
 ## Settings
 Some settings you can do:
