@@ -25,6 +25,14 @@ local function set_settings(opts)
 	})
 end
 
+local function filter_floating_wins(wins)
+	return vim.tbl_filter(function(win)
+		if api.nvim_win_get_config(win).zindex ~= nil then
+			return true
+		end
+	end, wins)
+end
+
 local function create_padbuf(win)
 	local padbuf = api.nvim_create_buf(false, true)
 	local opt = {}
@@ -79,6 +87,11 @@ end
 local function avoid_enter_padwin()
 	local win = api.nvim_get_current_win()
 
+	-- avoid floating windows
+	if api.nvim_win_get_config(win).zindex ~= nil then
+		return
+	end
+
 	if not is_padwin(win) then
 		return
 	end
@@ -116,6 +129,7 @@ end
 
 local function is_splitted_vertically()
 	local wins = api.nvim_tabpage_list_wins(0)
+	wins = filter_floating_wins(wins)
 	local i = 0
 
 	for _, win in pairs(wins) do
